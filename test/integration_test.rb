@@ -1,69 +1,82 @@
 require File.expand_path('../helper', __FILE__)
-require 'rbconfig'
-require 'open-uri'
+require File.expand_path('../integration_helper', __FILE__)
 require 'timeout'
 
+# These tests start a real server and talk to it over TCP.
+# Every test runs with every detected server.
+#
+# See test/integration/app.rb for the code of the app we test against.
 class IntegrationTest < Test::Unit::TestCase
-  def app_file
-    File.expand_path('../integration/app.rb', __FILE__)
+  extend IntegrationHelper
+  attr_accessor :server
+
+  it('sets the app_file') { assert_equal server.app_file, server.get("/app_file") }
+  it('only extends main') { assert_equal "true", server.get("/mainonly") }
+
+  it 'logs once in development mode' do
+    random = "%064x" % Kernel.rand(2**256-1)
+    server.get "/ping?x=#{random}"
+    count = server.log.scan("GET /ping?x=#{random}").count
+    server.webrick? ? assert(count > 0) : assert_equal(1, count)
   end
 
-  def port
-    5000 + (Process.pid % 1000)
-  end
-
-  def command
-    cmd = ['exec']
-    if RbConfig.respond_to? :ruby
-      cmd << RbConfig.ruby.inspect
-    else
-      file, dir = RbConfig::CONFIG.values_at('ruby_install_name', 'bindir')
-      cmd << File.expand_path(file, dir).inspect
+  it 'streams' do
+    next if server.webrick?
+    times, chunks = [Time.now], []
+    server.get_stream do |chunk|
+      next if chunk.empty?
+      chunks << chunk
+      times << Time.now
     end
-    cmd << "-I" << File.expand_path('../../lib', __FILE__).inspect
-    cmd << app_file.inspect << '-p' << port << '2>&1'
-    cmd.join(" ")
+    assert_equal ["a", "b"], chunks
+    assert times[1] - times[0] < 1
+    assert times[2] - times[1] > 1
   end
 
-  def display_output(pipe)
-    out = ""
-    loop { out <<  pipe.read_nonblock(1) }
-  rescue
-    $stderr.puts command, out unless out.empty?
-  end
+  it 'streams async' do
+    next unless server.name == 'thin'
 
-  def kill(pid, signal = "TERM")
-    Process.kill(signal, pid)
-  rescue NotImplementedError
-    system "kill -s #{signal} #{pid}"
-  end
-
-  def with_server
-    pipe = IO.popen(command)
-    error = nil
-    Timeout.timeout(120) do
-      begin
-        yield
-      rescue Errno::ECONNREFUSED => e
-        error = e
-        sleep 0.1
-        retry
+    Timeout.timeout(3) do
+      chunks = []
+      server.get_stream '/async' do |chunk|
+        next if chunk.empty?
+        chunks << chunk
+        case chunk
+        when "hi!"   then server.get "/send?msg=hello"
+        when "hello" then server.get "/send?close=1"
+        end
       end
-    end
-    kill(pipe.pid) if pipe
-  rescue Timeout::Error => e
-    display_output pipe
-    kill(pipe.pid, "KILL") if pipe
-    raise error || e
-  end
 
-  def assert_content(url, content)
-    with_server do
-      response = open("http://127.0.0.1:#{port}#{url}")
-      assert_equal response.read, content
+      assert_equal ['hi!', 'hello'], chunks
     end
   end
 
-  it('sets the app_file') { assert_content "/app_file", app_file }
-  it('only extends main') { assert_content "/mainonly", "true"   }
+  it 'streams async from subclass' do
+    next unless server.name == 'thin'
+
+    Timeout.timeout(3) do
+      chunks = []
+      server.get_stream '/subclass/async' do |chunk|
+        next if chunk.empty?
+        chunks << chunk
+        case chunk
+        when "hi!"   then server.get "/subclass/send?msg=hello"
+        when "hello" then server.get "/subclass/send?close=1"
+        end
+      end
+
+      assert_equal ['hi!', 'hello'], chunks
+    end
+  end
+
+
+  it 'starts the correct server' do
+    exp = %r{
+      ==\sSinatra/#{Sinatra::VERSION}\s
+      has\staken\sthe\sstage\son\s\d+\sfor\sdevelopment\s
+      with\sbackup\sfrom\s#{server}
+    }ix
+
+    assert_match exp, server.log
+  end
 end

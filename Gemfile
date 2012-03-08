@@ -47,6 +47,7 @@ if RUBY_ENGINE == 'jruby'
   gem 'nokogiri', '!= 1.5.0'
   gem 'jruby-openssl'
 else
+  gem 'yajl-ruby'
   gem 'nokogiri'
 end
 
@@ -56,18 +57,22 @@ else
   gem 'less', '~> 1.0'
 end
 
-unless RUBY_ENGINE == 'jruby' && JRUBY_VERSION < "1.6.1" && !ENV['TRAVIS']
+if RUBY_ENGINE != 'jruby' or not ENV['TRAVIS']
   # C extensions
   gem 'rdiscount'
-  platforms(:ruby_18) { gem 'redcarpet' }
+  platforms(:ruby_18) do
+    gem 'redcarpet'
+    gem 'mongrel'
+  end
   gem 'RedCloth' unless RUBY_ENGINE == "macruby"
+  gem 'thin'
 
   ## bluecloth is broken
   #gem 'bluecloth'
 end
 
 platforms :ruby_18, :jruby do
-  gem 'json'
+  gem 'json' unless RUBY_VERSION > '1.9' # is there a jruby but 1.8 only selector?
 end
 
 platforms :mri_18 do

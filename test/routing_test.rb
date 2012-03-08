@@ -236,6 +236,12 @@ class RoutingTest < Test::Unit::TestCase
     assert_equal "format=", body
   end
 
+  it 'does not concatinate params with the same name' do
+    mock_app { get('/:foo') { params[:foo] } }
+    get '/a?foo=b'
+    assert_body 'a'
+  end
+
   it "supports single splat params like /*" do
     mock_app {
       get '/*' do
@@ -329,6 +335,17 @@ class RoutingTest < Test::Unit::TestCase
     assert not_found?
   end
 
+  it "converts plus sign into space as the value of a named param" do
+    mock_app {
+      get '/:test' do
+        params["test"]
+      end
+    }
+    get '/bob+ross'
+    assert ok?
+    assert_equal 'bob ross', body
+  end
+
   it "literally matches parens in paths" do
     route_def '/test(bar)/'
 
@@ -358,6 +375,30 @@ class RoutingTest < Test::Unit::TestCase
     }
     get '/testme?bar[foo]=baz'
     assert_equal 'well, alright', body
+  end
+
+  it "exposes params nested within arrays with indifferent hash" do
+    mock_app {
+      get '/testme' do
+        assert_equal 'baz', params['bar'][0]['foo']
+        assert_equal 'baz', params['bar'][0][:foo]
+        'well, alright'
+      end
+    }
+    get '/testme?bar[][foo]=baz'
+    assert_equal 'well, alright', body
+  end
+
+  it "supports arrays within params" do
+    mock_app {
+      get '/foo' do
+        assert_equal ['A', 'B'], params['bar']
+        'looks good'
+      end
+    }
+    get '/foo?bar[]=A&bar[]=B'
+    assert ok?
+    assert_equal 'looks good', body
   end
 
   it "supports deeply nested params" do

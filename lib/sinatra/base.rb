@@ -87,6 +87,22 @@ module Sinatra
     end
   end
 
+  # Behaves exactly like Rack::CommonLogger with the notable exception that it does nothing,
+  # if another CommonLogger is already in the middleware chane.
+  class CommonLogger < Rack::CommonLogger
+    def call(env)
+      env['sinatra.commonlogger'] ? @app.call(env) : super
+    end
+
+    superclass.class_eval do
+      alias call_without_check call unless method_defined? :call_without_check
+      def call(env)
+        env['sinatra.commonlogger'] = true
+        call_without_check(env)
+      end
+    end
+  end
+
   class NotFound < NameError #:nodoc:
     def http_status; 404 end
   end
@@ -229,6 +245,7 @@ module Sinatra
       file.path = path
       result    = file.serving env
       result[1].each { |k,v| headers[k] ||= v }
+      headers['Content-Length'] = result[1]['Content-Length']
       halt opts[:status] || result[0], result[2]
     rescue Errno::ENOENT
       not_found
@@ -275,6 +292,7 @@ module Sinatra
       end
 
       def callback(&block)
+        return yield if @closed
         @callbacks << block
       end
 
@@ -290,6 +308,7 @@ module Sinatra
     def stream(keep_open = false)
       scheduler = env['async.callback'] ? EventMachine : Stream
       current   = @params.dup
+
       block     = proc do |out|
         begin
           original, @params = @params, current
@@ -299,7 +318,14 @@ module Sinatra
         end
       end
 
-      body Stream.new(scheduler, keep_open, &block)
+      out = Stream.new(scheduler, keep_open, &block)
+
+      if env['async.close']
+        env['async.close'].callback { out.close }
+        env['async.close'].errback { out.close }
+      end
+
+      body out
     end
 
     # Specify response freshness policy for HTTP caches (Cache-Control header).
@@ -594,6 +620,11 @@ module Sinatra
       render :creole, template, options, locals
     end
 
+    def yajl(template, options={}, locals={})
+      options[:default_content_type] = :json
+      render :yajl, template, options, locals
+    end
+
     # Calls the given block for every possible template file in views,
     # named name.ext, where ext is registered on engine.
     def find_template(views, name, engine)
@@ -810,11 +841,11 @@ module Sinatra
       route = @request.path_info
       route = '/' if route.empty? and not settings.empty_path_info?
       return unless match = pattern.match(route)
-      values += match.captures.to_a.map { |v| force_encoding URI.decode(v) if v }
+      values += match.captures.to_a.map { |v| force_encoding URI.decode_www_form_component(v) if v }
 
       if values.any?
         original, @params = params, params.merge('splat' => [], 'captures' => values)
-        keys.zip(values) { |k,v| (@params[k] ||= '') << v if v }
+        keys.zip(values) { |k,v| Array === @params[k] ? @params[k] << v : @params[k] = v if v }
       end
 
       catch(:pass) do
@@ -853,11 +884,16 @@ module Sinatra
     end
 
     # Enable string or symbol key access to the nested params hash.
-    def indifferent_params(params)
-      params = indifferent_hash.merge(params)
-      params.each do |key, value|
-        next unless value.is_a?(Hash)
-        params[key] = indifferent_params(value)
+    def indifferent_params(object)
+      case object
+      when Hash
+        new_hash = indifferent_hash
+        object.each { |key, value| new_hash[key] = indifferent_params(value) }
+        new_hash
+      when Array
+        object.map { |item| indifferent_params(item) }
+      else
+        object
       end
     end
 
@@ -1379,8 +1415,7 @@ module Sinatra
       end
 
       def setup_common_logger(builder)
-        return if ["development", "deployment", nil].include? ENV["RACK_ENV"]
-        builder.use Rack::CommonLogger
+        builder.use Sinatra::CommonLogger
       end
 
       def setup_custom_logger(builder)
@@ -1412,8 +1447,7 @@ module Sinatra
         servers.each do |server_name|
           begin
             return Rack::Handler.get(server_name.to_s)
-          rescue LoadError
-          rescue NameError
+          rescue LoadError, NameError
           end
         end
         fail "Server handler (#{servers.join(',')}) not found."
@@ -1446,8 +1480,11 @@ module Sinatra
         /src\/kernel\/bootstrap\/[A-Z]/                  # maglev kernel files
       ]
 
-      # add rubinius (and hopefully other VM impls) ignore patterns ...
-      CALLERS_TO_IGNORE.concat(RUBY_IGNORE_CALLERS) if defined?(RUBY_IGNORE_CALLERS)
+      # contrary to what the comment said previously, rubinius never supported this
+      if defined?(RUBY_IGNORE_CALLERS)
+        warn "RUBY_IGNORE_CALLERS is deprecated and will no longer be supported by Sinatra 2.0"
+        CALLERS_TO_IGNORE.concat(RUBY_IGNORE_CALLERS)
+      end
 
       # Like Kernel#caller but excluding certain magic entries and without
       # line / method information; the resulting array contains filenames only.
@@ -1529,7 +1566,7 @@ module Sinatra
 
     set :run, false                       # start server via at-exit hook?
     set :running, false                   # is the built-in server running now?
-    set :server, %w[thin mongrel webrick]
+    set :server, %w[thin puma mongrel webrick]
     set :bind, '0.0.0.0'
     set :port, 4567
 

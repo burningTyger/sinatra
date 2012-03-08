@@ -1,3 +1,4 @@
+$stderr.puts "loading"
 require 'sinatra'
 
 configure do
@@ -9,6 +10,19 @@ get '/app_file' do
   settings.app_file
 end
 
+get '/ping' do
+  'pong'
+end
+
+get '/stream' do
+  stream do |out|
+    sleep 0.1
+    out << "a"
+    sleep 1.2
+    out << "b"
+  end
+end
+
 get '/mainonly' do
   object = Object.new
   begin
@@ -18,3 +32,33 @@ get '/mainonly' do
     'true'
   end
 end
+
+set :out, nil
+get '/async' do
+  stream(:keep_open) { |o| (settings.out = o) << "hi!" }
+end
+
+get '/send' do
+  settings.out << params[:msg] if params[:msg]
+  settings.out.close if params[:close]
+  "ok"
+end
+
+class Subclass < Sinatra::Base
+  set :out, nil
+  get '/subclass/async' do
+    settings.out << msg and halt(204) if params[:msg]
+    settings.out.close  and halt(204) if params[:close]
+    stream(:keep_open) { |o| settings.out = o }
+  end
+
+  get '/subclass/send' do
+    settings.out << params[:msg] if params[:msg]
+    settings.out.close if params[:close]
+    "ok"
+  end
+end
+
+use Subclass
+
+$stderr.puts "starting"
